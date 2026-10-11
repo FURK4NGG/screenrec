@@ -3,9 +3,6 @@
 
 ![screenrec Demo Video](https://github.com/FURK4NGG/screenrec/blob/main/screenrec.gif)
 
-![screenrec_install Demo Image](https://github.com/FURK4NGG/screenrec/blob/main/screenrec_install.webp)
-
-
 <br><br>
 
 ✅ Works On  
