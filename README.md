@@ -1,7 +1,7 @@
 ## 👀 screenrec Overview  
 **ScreenRec** is a Linux screen recording utility that lets you record selected screen regions with configurable recording settings, a dedicated graphical interface, and keyboard or mouse controls for stopping recordings.
 
-![screenrec Demo Video](https://github.com/FURK4NGG/screenrec/blob/main/screenrec.gif)
+![screenrec Demo Video](https://github.com/FURK4NGG/screenrec/blob/main/%7B%7D/screenrec.gif)
 
 <br><br>
 
