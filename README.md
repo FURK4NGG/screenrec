@@ -88,6 +88,7 @@ sudo apt install -y \
     dbus-x11
 ```
 
+```
 python3 - <<'PY'
 from pathlib import Path
 import re
@@ -220,7 +221,7 @@ PY
 
 bash -n ~/.config/scripts/screenrec.sh
 python3 -m py_compile ~/.config/scripts/screenrec-ui.py
-
+```
 </details>
 <br>
 
