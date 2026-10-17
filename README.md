@@ -234,7 +234,7 @@ sudo dnf install -y git python3 python3-gobject python3-cairo python3-evdev gtk4
 
 ## 🎉 Run
 ```
-python3 ~/.config/scripts/screenrec-ui.py
+python3 ~/.config/screenrec/screenrec-ui.py
 ```
 <br><br>
 
