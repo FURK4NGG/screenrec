@@ -93,46 +93,57 @@ sudo apt install -y \
 python3 - <<'PY'
 from pathlib import Path
 import re
+import shutil
 
-ui = Path.home() / ".config/screenrec/screenrec-ui.py"
-text = ui.read_text(encoding="utf-8")
+base = Path.home() / ".config" / "screenrec"
+ui = base / "screenrec-ui.py"
+script = base / "screenrec.sh"
 
-# Replace Adw.ToolbarView with a GTK4-compatible Gtk.Box layout.
-old = '''        toolbar = Adw.ToolbarView()
-        header = Adw.HeaderBar()'''
-new = '''        root = Gtk.Box(
+if not ui.is_file() or not script.is_file():
+    raise SystemExit("[ERROR] ScreenRec UI or shell script not found.")
+
+ui_text = ui.read_text(encoding="utf-8")
+sh_text = script.read_text(encoding="utf-8")
+
+# ---- UI: replace Adw.ToolbarView ----
+replacements = [
+    (
+        '''        toolbar = Adw.ToolbarView()
+        header = Adw.HeaderBar()''',
+        '''        root = Gtk.Box(
             orientation=Gtk.Orientation.VERTICAL,
             spacing=0
         )
-        header = Adw.HeaderBar()'''
+        header = Adw.HeaderBar()''',
+        "Toolbar initialization",
+    ),
+    (
+        "        toolbar.add_top_bar(header)",
+        "        root.append(header)",
+        "Header attachment",
+    ),
+    (
+        '''        toolbar.set_content(self.content)
+        self.window.set_content(toolbar)''',
+        '''        root.append(self.content)
+        self.window.set_content(root)''',
+        "Main content attachment",
+    ),
+]
 
-if old not in text:
-    raise SystemExit("[ERROR] Toolbar initialization block not found.")
+for old, new, label in replacements:
+    if old in ui_text:
+        ui_text = ui_text.replace(old, new, 1)
+    elif new not in ui_text:
+        raise SystemExit(f"[ERROR] {label} block not found.")
 
-text = text.replace(old, new, 1)
+# ---- UI: use a GTK 4.8-compatible folder chooser ----
+folder_pattern = (
+    r'    def choose_folder\(self, \*_?\):.*?'
+    r'(?=    def capture_key\()'
+)
 
-old = '''        toolbar.add_top_bar(header)'''
-new = '''        root.append(header)'''
-
-if old not in text:
-    raise SystemExit("[ERROR] Header attachment block not found.")
-
-text = text.replace(old, new, 1)
-
-old = '''        toolbar.set_content(self.content)
-        self.window.set_content(toolbar)'''
-new = '''        root.append(self.content)
-        self.window.set_content(root)'''
-
-if old not in text:
-    raise SystemExit("[ERROR] Main content attachment block not found.")
-
-text = text.replace(old, new, 1)
-
-# Replace Gtk.FileDialog with Gtk.FileChooserNative for GTK 4.8.
-pattern = r'    def choose_folder\(self, \*_?\):.*?(?=    def capture_key\()'
-
-replacement = '''    def choose_folder(self, *_):
+folder_replacement = '''    def choose_folder(self, *_):
         tr = self.config.get("language") == "tr"
 
         dialog = Gtk.FileChooserNative.new(
@@ -142,7 +153,6 @@ replacement = '''    def choose_folder(self, *_):
             "Seç" if tr else "Select",
             "İptal" if tr else "Cancel"
         )
-
         dialog.connect("response", self.folder_selected)
         dialog.show()
 
@@ -157,17 +167,87 @@ replacement = '''    def choose_folder(self, *_):
 
 '''
 
-text, count = re.subn(pattern, replacement, text, count=1, flags=re.S)
-
+ui_text, count = re.subn(
+    folder_pattern, folder_replacement, ui_text,
+    count=1, flags=re.S
+)
 if count != 1:
-    raise SystemExit("[ERROR] Folder chooser functions were not replaced.")
+    raise SystemExit("[ERROR] Folder chooser methods not found.")
 
-ui.write_text(text, encoding="utf-8")
-print("[OK] GTK compatibility changes applied.")
+# ---- Shell: select the correct recording backend ----
+old_geometry = '''    GEOM="$(slurp -o -f "%x,%y %wx%h" 2>/dev/null)" || exit 0'''
+
+new_geometry = '''    BACKEND=""
+    GEOM=""
+
+    if [ -n "${WAYLAND_DISPLAY:-}" ]; then
+        BACKEND="wayland"
+        GEOM="$(slurp -o -f "%x,%y %wx%h" 2>/dev/null)" || exit 0
+        [ -n "$GEOM" ] || exit 0
+    elif [ -n "${DISPLAY:-}" ]; then
+        BACKEND="x11"
+    else
+        echo "No graphical display available" >&2
+        exit 1
+    fi'''
+
+if old_geometry in sh_text:
+    sh_text = sh_text.replace(old_geometry, new_geometry, 1)
+elif 'BACKEND="x11"' not in sh_text or 'BACKEND="wayland"' not in sh_text:
+    raise SystemExit("[ERROR] Recording backend selection block not found.")
+
+# ---- Shell: use FFmpeg on X11 and wf-recorder on Wayland ----
+old_recorder = '''    wf-recorder \\
+        --geometry "$GEOM" \\
+        --file "$FILE" \\
+        --audio=alsa_output.pci-0000_0d_00.6.analog-stereo.monitor \\
+        > /dev/null 2>&1 &
+
+    PID=$!'''
+
+new_recorder = '''    if [ "$BACKEND" = "x11" ]; then
+        if ! command -v ffmpeg >/dev/null 2>&1; then
+            echo "ffmpeg is not installed" >&2
+            exit 1
+        fi
+
+        ffmpeg -hide_banner -nostdin -loglevel warning \\
+            -f x11grab -framerate 30 -i "$DISPLAY" \\
+            -c:v libx264 -preset ultrafast -crf 23 \\
+            -pix_fmt yuv420p -movflags +faststart "$FILE" \\
+            > "$CACHE_DIR/ffmpeg.log" 2>&1 &
+    else
+        wf-recorder \\
+            --geometry "$GEOM" \\
+            --file "$FILE" \\
+            --audio=alsa_output.pci-0000_0d_00.6.analog-stereo.monitor \\
+            > "$CACHE_DIR/wf-recorder.log" 2>&1 &
+    fi
+
+    PID=$!'''
+
+if old_recorder in sh_text:
+    sh_text = sh_text.replace(old_recorder, new_recorder, 1)
+elif 'ffmpeg -hide_banner -nostdin -loglevel warning' not in sh_text:
+    raise SystemExit("[ERROR] Recorder launch block not found.")
+
+# Back up both files before writing.
+shutil.copy2(ui, ui.with_suffix(".py.bak"))
+shutil.copy2(script, script.with_suffix(".sh.bak"))
+
+ui.write_text(ui_text, encoding="utf-8")
+script.write_text(sh_text, encoding="utf-8")
+script.chmod(0o755)
+
+print("[OK] UI and recording backend updated.")
+print("[BACKUP]", ui.with_suffix(".py.bak"))
+print("[BACKUP]", script.with_suffix(".sh.bak"))
 PY
 
 python3 -m py_compile ~/.config/screenrec/screenrec-ui.py &&
-echo "[OK] Python syntax check passed." &&
+bash -n ~/.config/screenrec/screenrec.sh &&
+echo "[OK] Both files passed syntax checks." &&
+python3 ~/.config/screenrec/screenrec-ui.py
 ```
 </details>
 <br>
