@@ -93,135 +93,81 @@ sudo apt install -y \
 python3 - <<'PY'
 from pathlib import Path
 import re
-import sys
 
-home = Path.home()
+ui = Path.home() / ".config/screenrec/screenrec-ui.py"
+text = ui.read_text(encoding="utf-8")
 
-shell_files = [
-    home / "screenrec/screenrec.sh",
-    home / ".config/scripts/screenrec.sh",
-    home / ".config/screenrec/screenrec.sh",
-]
+# Replace Adw.ToolbarView with a GTK4-compatible Gtk.Box layout.
+old = '''        toolbar = Adw.ToolbarView()
+        header = Adw.HeaderBar()'''
+new = '''        root = Gtk.Box(
+            orientation=Gtk.Orientation.VERTICAL,
+            spacing=0
+        )
+        header = Adw.HeaderBar()'''
 
-ui_files = [
-    home / "screenrec/screenrec-ui.py",
-    home / ".config/scripts/screenrec-ui.py",
-]
+if old not in text:
+    raise SystemExit("[ERROR] Toolbar initialization block not found.")
 
-old_ffmpeg = '''        ffmpeg -hide_banner -loglevel warning \\
-            -f x11grab -framerate 30 -i "$DISPLAY" \\
-            -c:v libx264 -preset ultrafast -crf 23 \\
-            -pix_fmt yuv420p "$FILE" \\
-            > "$CACHE_DIR/ffmpeg.log" 2>&1 &
-'''
+text = text.replace(old, new, 1)
 
-new_ffmpeg = '''        ffmpeg -hide_banner -nostdin -loglevel warning \\
-            -f x11grab -framerate 30 -i "$DISPLAY" \\
-            -c:v libx264 -preset ultrafast -crf 23 \\
-            -pix_fmt yuv420p -movflags +faststart "$FILE" \\
-            > "$CACHE_DIR/ffmpeg.log" 2>&1 &
-'''
+old = '''        toolbar.add_top_bar(header)'''
+new = '''        root.append(header)'''
 
-start_function = '''    def start_recording(self, *_):
+if old not in text:
+    raise SystemExit("[ERROR] Header attachment block not found.")
+
+text = text.replace(old, new, 1)
+
+old = '''        toolbar.set_content(self.content)
+        self.window.set_content(toolbar)'''
+new = '''        root.append(self.content)
+        self.window.set_content(root)'''
+
+if old not in text:
+    raise SystemExit("[ERROR] Main content attachment block not found.")
+
+text = text.replace(old, new, 1)
+
+# Replace Gtk.FileDialog with Gtk.FileChooserNative for GTK 4.8.
+pattern = r'    def choose_folder\(self, \*_?\):.*?(?=    def capture_key\()'
+
+replacement = '''    def choose_folder(self, *_):
+        tr = self.config.get("language") == "tr"
+
+        dialog = Gtk.FileChooserNative.new(
+            "Kayıt klasörünü seç" if tr else "Select recording folder",
+            self.window,
+            Gtk.FileChooserAction.SELECT_FOLDER,
+            "Seç" if tr else "Select",
+            "İptal" if tr else "Cancel"
+        )
+
+        dialog.connect("response", self.folder_selected)
+        dialog.show()
+
+    def folder_selected(self, dialog, response):
         try:
-            self._persist_current_settings()
-        except Exception as e:
-            self.notify(
-                f"Folder error: {e}"
-            )
-            return
+            if response == Gtk.ResponseType.ACCEPT:
+                folder = dialog.get_file()
+                if folder:
+                    self.folder_entry.set_text(folder.get_path())
+        finally:
+            dialog.destroy()
 
-        active = self.get_active_recordings()
-
-        if active:
-            tr = self.config.get("language") == "tr"
-            self.show_start_already_running_dialog(tr)
-            return
-
-        if not SCRIPT_FILE.exists():
-            self.notify("screenrec.sh not found")
-            return
-
-        log_dir = Path.home() / ".cache" / "screenrec"
-        log_dir.mkdir(parents=True, exist_ok=True)
-        log_file = log_dir / "launcher.log"
-
-        try:
-            with log_file.open("a", encoding="utf-8") as output:
-                output.write("\\\\n--- Starting ScreenRec ---\\\\n")
-                output.flush()
-                subprocess.Popen(
-                    [str(SCRIPT_FILE), "start"],
-                    stdin=subprocess.DEVNULL,
-                    stdout=output,
-                    stderr=subprocess.STDOUT,
-                    start_new_session=True,
-                )
-        except Exception as e:
-            self.notify(f"Failed to start recording: {e}")
 '''
 
-failed = False
+text, count = re.subn(pattern, replacement, text, count=1, flags=re.S)
 
-for path in shell_files:
-    if not path.exists():
-        continue
+if count != 1:
+    raise SystemExit("[ERROR] Folder chooser functions were not replaced.")
 
-    text = path.read_text(encoding="utf-8")
-
-    if old_ffmpeg in text:
-        updated = text.replace(old_ffmpeg, new_ffmpeg, 1)
-    elif new_ffmpeg in text:
-        print(f"[OK] FFmpeg already updated: {path}")
-        continue
-    else:
-        print(f"[ERROR] FFmpeg block not found: {path}")
-        failed = True
-        continue
-
-    backup = path.with_suffix(path.suffix + ".final-backup")
-    if not backup.exists():
-        backup.write_text(text, encoding="utf-8")
-
-    path.write_text(updated, encoding="utf-8")
-    print(f"[OK] Updated recorder: {path}")
-
-for path in ui_files:
-    if not path.exists():
-        continue
-
-    text = path.read_text(encoding="utf-8")
-    pattern = re.compile(
-        r"^    def start_recording\(self, \*_\):\n"
-        r".*?(?=^    def stop_recording\(self, \*_\):)",
-        re.M | re.S,
-    )
-
-    match = pattern.search(text)
-    if not match:
-        if "launcher.log" in text:
-            print(f"[OK] Launcher logging already enabled: {path}")
-        else:
-            print(f"[ERROR] start_recording function not found: {path}")
-            failed = True
-        continue
-
-    backup = path.with_suffix(path.suffix + ".final-backup")
-    if not backup.exists():
-        backup.write_text(text, encoding="utf-8")
-
-    updated = text[:match.start()] + start_function + "\n" + text[match.end():]
-    path.write_text(updated, encoding="utf-8")
-    print(f"[OK] Updated UI: {path}")
-
-if failed:
-    sys.exit("Some files were not updated. Review the errors above.")
-
-print("\\nFinished. Validate syntax before launching.")
+ui.write_text(text, encoding="utf-8")
+print("[OK] GTK compatibility changes applied.")
 PY
 
-bash -n ~/.config/scripts/screenrec.sh
-python3 -m py_compile ~/.config/scripts/screenrec-ui.py
+python3 -m py_compile ~/.config/screenrec/screenrec-ui.py &&
+echo "[OK] Python syntax check passed." &&
 ```
 </details>
 <br>
