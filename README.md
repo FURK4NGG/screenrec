@@ -71,6 +71,7 @@ sudo pacman -S git python python-gobject python-cairo python-evdev gtk4 libadwai
 
 <details>
 <summary>Debian / Ubuntu</summary>
+
 ```
 sudo apt update
 sudo apt install -y \
