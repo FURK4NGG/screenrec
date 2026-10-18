@@ -319,7 +319,7 @@ PY
 
 python3 -m py_compile ~/.config/screenrec/screenrec-ui.py &&
 bash -n ~/.config/screenrec/screenrec.sh &&
-echo "[OK] Syntax checks passed." &&
+echo "[OK] Syntax checks passed."
 ```
 </details>
 <br>
