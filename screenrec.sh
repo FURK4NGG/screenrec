@@ -43,6 +43,9 @@ mkdir -p "$OUTPUT_DIR"
 STOP_KEY="$(get_config stop_key)"
 DELAY_ENABLED="$(get_config starting_delay_enabled)"
 DELAY="$(get_config starting_delay)"
+MICROPHONE_ENABLED="$(get_config microphone_enabled)"
+MICROPHONE_SOURCE="$(get_config microphone_source)"
+INSCREEN_AUDIO_ENABLED="$(get_config inscreen_audio_enabled)"
 [ -n "$DELAY" ] || DELAY=5
 
 # --------------------------------------------------
@@ -276,11 +279,79 @@ PY
         exit 0
     fi
 
-    wf-recorder \
-        --geometry "$GEOM" \
-        --file "$FILE" \
-        --audio=alsa_output.pci-0000_0d_00.6.analog-stereo.monitor \
-        > /dev/null 2>&1 &
+    # Build the audio source list from the selected options.
+    # wf-recorder accepts one source, so when both are enabled, route both
+    # inputs into a temporary PulseAudio/PipeWire null sink and record its monitor.
+    AUDIO_SOURCE=""
+    MIC_ACTIVE=0
+    SCREEN_AUDIO_ACTIVE=0
+    [ "$MICROPHONE_ENABLED" = "1" ] && [ -n "$MICROPHONE_SOURCE" ] && MIC_ACTIVE=1
+
+    if [ "$INSCREEN_AUDIO_ENABLED" = "1" ]; then
+        DEFAULT_SINK="$(pactl get-default-sink 2>/dev/null)"
+        if [ -n "$DEFAULT_SINK" ]; then
+            CANDIDATE="${DEFAULT_SINK}.monitor"
+            if pactl list short sources 2>/dev/null | awk '{print $2}' | grep -Fxq "$CANDIDATE"; then
+                SCREEN_AUDIO_SOURCE="$CANDIDATE"
+                SCREEN_AUDIO_ACTIVE=1
+            fi
+        fi
+        # Fall back to the first available monitor source if default-sink lookup
+        # is unavailable or the source name differs.
+        if [ "$SCREEN_AUDIO_ACTIVE" = "0" ]; then
+            SCREEN_AUDIO_SOURCE="$(pactl list short sources 2>/dev/null | awk '$2 ~ /\.monitor$/ {print $2; exit}')"
+            [ -n "$SCREEN_AUDIO_SOURCE" ] && SCREEN_AUDIO_ACTIVE=1
+        fi
+    fi
+
+    AUDIO_MODULES=()
+    cleanup_audio_modules() {
+        for module_id in "${AUDIO_MODULES[@]}"; do
+            pactl unload-module "$module_id" >/dev/null 2>&1 || true
+        done
+    }
+    trap cleanup_audio_modules EXIT INT TERM
+
+    if [ "$MIC_ACTIVE" = "1" ] && [ "$SCREEN_AUDIO_ACTIVE" = "1" ]; then
+        MIX_SINK="screenrec_mix_$$"
+        NULL_MODULE="$(pactl load-module module-null-sink sink_name="$MIX_SINK" sink_properties=device.description=ScreenRecorderMix 2>/dev/null)"
+        if [[ "$NULL_MODULE" =~ ^[0-9]+$ ]]; then
+            AUDIO_MODULES+=("$NULL_MODULE")
+            MIC_MODULE="$(pactl load-module module-loopback source="$MICROPHONE_SOURCE" sink="$MIX_SINK" 2>/dev/null)"
+            SCREEN_MODULE="$(pactl load-module module-loopback source="$SCREEN_AUDIO_SOURCE" sink="$MIX_SINK" 2>/dev/null)"
+            [[ "$MIC_MODULE" =~ ^[0-9]+$ ]] && AUDIO_MODULES+=("$MIC_MODULE")
+            [[ "$SCREEN_MODULE" =~ ^[0-9]+$ ]] && AUDIO_MODULES+=("$SCREEN_MODULE")
+            if [[ "$MIC_MODULE" =~ ^[0-9]+$ ]] && [[ "$SCREEN_MODULE" =~ ^[0-9]+$ ]]; then
+                AUDIO_SOURCE="${MIX_SINK}.monitor"
+            else
+                cleanup_audio_modules
+                AUDIO_MODULES=()
+                # Avoid silently recording only one of two requested sources.
+                notify-send "Screen Recorder" "Could not combine microphone and in-screen audio." 2>/dev/null || true
+                exit 1
+            fi
+        else
+            notify-send "Screen Recorder" "Could not create the audio mixer." 2>/dev/null || true
+            exit 1
+        fi
+    elif [ "$MIC_ACTIVE" = "1" ]; then
+        AUDIO_SOURCE="$MICROPHONE_SOURCE"
+    elif [ "$SCREEN_AUDIO_ACTIVE" = "1" ]; then
+        AUDIO_SOURCE="$SCREEN_AUDIO_SOURCE"
+    fi
+
+    if [ -n "$AUDIO_SOURCE" ]; then
+        wf-recorder \
+            --geometry "$GEOM" \
+            --file "$FILE" \
+            --audio="$AUDIO_SOURCE" \
+            > /dev/null 2>&1 &
+    else
+        wf-recorder \
+            --geometry "$GEOM" \
+            --file "$FILE" \
+            > /dev/null 2>&1 &
+    fi
 
     PID=$!
 
@@ -306,6 +377,8 @@ PY
         "$MSG_STARTED"
 
     wait "$PID" 2>/dev/null
+    cleanup_audio_modules
+    trap - EXIT INT TERM
     rm -f "$META"
 
     exit 0

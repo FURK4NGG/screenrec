@@ -31,7 +31,10 @@ DEFAULT_CONFIG = {
     "language": "en",
     "dark_mode": True,
     "starting_delay": 5,
-    "starting_delay_enabled": False
+    "starting_delay_enabled": False,
+    "microphone_enabled": False,
+    "microphone_source": "",
+    "inscreen_audio_enabled": False
 }
 
 
@@ -601,6 +604,81 @@ class ScreenRecorderUI(Adw.Application):
         self.content.append(hint)
 
         # ------------------------------
+        # Audio capture options
+        # ------------------------------
+
+        audio_title = Gtk.Label(
+            label="Ses kaydı" if tr else "Audio capture"
+        )
+        audio_title.add_css_class("heading")
+        audio_title.set_halign(Gtk.Align.START)
+        self.content.append(audio_title)
+
+        # Microphone: label, source dropdown, switch (left to right).
+        mic_row = Gtk.Box(
+            orientation=Gtk.Orientation.HORIZONTAL,
+            spacing=10
+        )
+
+        mic_label = Gtk.Label(
+            label="Mikrofon" if tr else "Microphone",
+            xalign=0
+        )
+        mic_label.set_hexpand(True)
+        mic_row.append(mic_label)
+
+        self.microphone_dropdown = Gtk.DropDown(
+            model=Gtk.StringList.new(
+                [("Hiçbiri" if tr else "None")]
+            )
+        )
+        self.microphone_dropdown.set_size_request(190, -1)
+        self.microphone_sources = [""]
+        self.populate_microphone_sources()
+        saved_mic = self.config.get("microphone_source", "")
+        if saved_mic in self.microphone_sources:
+            self.microphone_dropdown.set_selected(
+                self.microphone_sources.index(saved_mic)
+            )
+        else:
+            self.microphone_dropdown.set_selected(0)
+        mic_row.append(self.microphone_dropdown)
+
+        self.microphone_switch = Gtk.Switch()
+        self.microphone_switch.set_valign(Gtk.Align.CENTER)
+        self.microphone_switch.set_active(
+            bool(self.config.get("microphone_enabled", False))
+        )
+        self.microphone_switch.set_tooltip_text(
+            "Microphone" if not tr else "Mikrofon"
+        )
+        mic_row.append(self.microphone_switch)
+        self.content.append(mic_row)
+
+        # System / in-screen audio: switch aligned to the far right.
+        screen_audio_row = Gtk.Box(
+            orientation=Gtk.Orientation.HORIZONTAL,
+            spacing=10
+        )
+        screen_audio_label = Gtk.Label(
+            label="Ekran sesi" if tr else "In-screen audio",
+            xalign=0
+        )
+        screen_audio_label.set_hexpand(True)
+        screen_audio_row.append(screen_audio_label)
+
+        self.inscreen_audio_switch = Gtk.Switch()
+        self.inscreen_audio_switch.set_valign(Gtk.Align.CENTER)
+        self.inscreen_audio_switch.set_active(
+            bool(self.config.get("inscreen_audio_enabled", False))
+        )
+        self.inscreen_audio_switch.set_tooltip_text(
+            "Ekran sesi" if tr else "In-screen audio"
+        )
+        screen_audio_row.append(self.inscreen_audio_switch)
+        self.content.append(screen_audio_row)
+
+        # ------------------------------
         # Save settings
         # ------------------------------
 
@@ -734,6 +812,37 @@ class ScreenRecorderUI(Adw.Application):
 
         self.content.append(input_status)
 
+    def populate_microphone_sources(self):
+        """Populate the microphone selector with available non-monitor sources."""
+        tr = self.config.get("language") == "tr"
+        sources = []
+        try:
+            result = subprocess.run(
+                ["pactl", "list", "short", "sources"],
+                capture_output=True,
+                text=True,
+                check=True,
+                timeout=3
+            )
+            for line in result.stdout.splitlines():
+                fields = line.split()
+                if len(fields) < 2:
+                    continue
+                source_name = fields[1]
+                # Monitor sources capture output audio, not a microphone input.
+                if source_name.endswith(".monitor"):
+                    continue
+                sources.append(source_name)
+        except (OSError, subprocess.SubprocessError):
+            pass
+
+        self.microphone_sources = [""]
+        model = Gtk.StringList.new(["Hiçbiri" if tr else "None"])
+        for source in sources:
+            self.microphone_sources.append(source)
+            model.append(source)
+        self.microphone_dropdown.set_model(model)
+
     def input_devices_available(self):
         if list_devices is None or InputDevice is None:
             return False
@@ -866,6 +975,17 @@ class ScreenRecorderUI(Adw.Application):
             return
 
         self.config["output_dir"] = output
+        mic_index = self.microphone_dropdown.get_selected()
+        self.config["microphone_source"] = (
+            self.microphone_sources[mic_index]
+            if mic_index < len(self.microphone_sources) else ""
+        )
+        self.config["microphone_enabled"] = (
+            self.microphone_switch.get_active()
+        )
+        self.config["inscreen_audio_enabled"] = (
+            self.inscreen_audio_switch.get_active()
+        )
 
         save_config(self.config)
 
@@ -921,6 +1041,17 @@ class ScreenRecorderUI(Adw.Application):
         output = os.path.expanduser(output)
         Path(output).mkdir(parents=True, exist_ok=True)
         self.config["output_dir"] = output
+        mic_index = self.microphone_dropdown.get_selected()
+        self.config["microphone_source"] = (
+            self.microphone_sources[mic_index]
+            if mic_index < len(self.microphone_sources) else ""
+        )
+        self.config["microphone_enabled"] = (
+            self.microphone_switch.get_active()
+        )
+        self.config["inscreen_audio_enabled"] = (
+            self.inscreen_audio_switch.get_active()
+        )
         save_config(self.config)
         self.install_script()
 
