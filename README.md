@@ -103,42 +103,51 @@ script = base / "screenrec.sh"
 if not ui.is_file() or not script.is_file():
     raise SystemExit("[ERROR] ScreenRec UI or shell script not found.")
 
-ui_text = ui.read_text(encoding="utf-8")
-sh_text = script.read_text(encoding="utf-8")
+u = ui.read_text(encoding="utf-8")
+s = script.read_text(encoding="utf-8")
 
-# ---- UI: replace Adw.ToolbarView ----
-replacements = [
-    (
-        '''        toolbar = Adw.ToolbarView()
+
+def replace_once(text, old, new, label):
+    if old in text:
+        return text.replace(old, new, 1)
+    if new in text:
+        return text
+    raise SystemExit(f"[ERROR] Could not locate {label}. No files changed.")
+
+
+# --------------------------------------------------
+# UI: Debian 12 / libadwaita compatibility
+# --------------------------------------------------
+
+u = replace_once(
+    u,
+    '''        toolbar = Adw.ToolbarView()
         header = Adw.HeaderBar()''',
-        '''        root = Gtk.Box(
+    '''        root = Gtk.Box(
             orientation=Gtk.Orientation.VERTICAL,
             spacing=0
         )
         header = Adw.HeaderBar()''',
-        "Toolbar initialization",
-    ),
-    (
-        "        toolbar.add_top_bar(header)",
-        "        root.append(header)",
-        "Header attachment",
-    ),
-    (
-        '''        toolbar.set_content(self.content)
+    "ToolbarView initialization",
+)
+
+u = replace_once(
+    u,
+    "        toolbar.add_top_bar(header)",
+    "        root.append(header)",
+    "header attachment",
+)
+
+u = replace_once(
+    u,
+    '''        toolbar.set_content(self.content)
         self.window.set_content(toolbar)''',
-        '''        root.append(self.content)
+    '''        root.append(self.content)
         self.window.set_content(root)''',
-        "Main content attachment",
-    ),
-]
+    "main content attachment",
+)
 
-for old, new, label in replacements:
-    if old in ui_text:
-        ui_text = ui_text.replace(old, new, 1)
-    elif new not in ui_text:
-        raise SystemExit(f"[ERROR] {label} block not found.")
-
-# ---- UI: use a GTK 4.8-compatible folder chooser ----
+# Replace Gtk.FileDialog with Gtk.FileChooserNative for GTK 4.8.
 folder_pattern = (
     r'    def choose_folder\(self, \*_?\):.*?'
     r'(?=    def capture_key\()'
@@ -168,14 +177,29 @@ folder_replacement = '''    def choose_folder(self, *_):
 
 '''
 
-ui_text, count = re.subn(
-    folder_pattern, folder_replacement, ui_text,
-    count=1, flags=re.S
+u2, count = re.subn(
+    folder_pattern,
+    folder_replacement,
+    u,
+    count=1,
+    flags=re.S,
 )
-if count != 1:
-    raise SystemExit("[ERROR] Folder chooser methods not found.")
 
-# ---- Shell: select the correct recording backend ----
+if count == 1:
+    u = u2
+elif not re.search(
+    r'    def choose_folder\(self, \*_?\):.*?'
+    r'Gtk\.FileChooserNative\.new',
+    u,
+    flags=re.S,
+):
+    raise SystemExit("[ERROR] Folder chooser block not found. No files changed.")
+
+
+# --------------------------------------------------
+# Shell: choose the correct display backend
+# --------------------------------------------------
+
 old_geometry = '''    GEOM="$(slurp -o -f "%x,%y %wx%h" 2>/dev/null)" || exit 0'''
 
 new_geometry = '''    BACKEND=""
@@ -192,62 +216,110 @@ new_geometry = '''    BACKEND=""
         exit 1
     fi'''
 
-if old_geometry in sh_text:
-    sh_text = sh_text.replace(old_geometry, new_geometry, 1)
-elif 'BACKEND="x11"' not in sh_text or 'BACKEND="wayland"' not in sh_text:
-    raise SystemExit("[ERROR] Recording backend selection block not found.")
+if old_geometry in s:
+    s = s.replace(old_geometry, new_geometry, 1)
+elif not (
+    'BACKEND="x11"' in s
+    and 'BACKEND="wayland"' in s
+):
+    raise SystemExit("[ERROR] Display backend block not found. No files changed.")
 
-# ---- Shell: use FFmpeg on X11 and wf-recorder on Wayland ----
-old_recorder = '''    wf-recorder \\
-        --geometry "$GEOM" \\
-        --file "$FILE" \\
-        --audio=alsa_output.pci-0000_0d_00.6.analog-stereo.monitor \\
-        > /dev/null 2>&1 &
 
-    PID=$!'''
+# --------------------------------------------------
+# Shell: preserve audio setup, replace only recorder
+# --------------------------------------------------
 
-new_recorder = '''    if [ "$BACKEND" = "x11" ]; then
+recorder_pattern = (
+    r'    if \[ -n "\$AUDIO_SOURCE" \]; then\n'
+    r'.*?'
+    r'\n    PID=\$\!'
+)
+
+recorder_replacement = '''    if [ "$BACKEND" = "x11" ]; then
         if ! command -v ffmpeg >/dev/null 2>&1; then
             echo "ffmpeg is not installed" >&2
             exit 1
         fi
 
-        ffmpeg -hide_banner -nostdin -loglevel warning \\
-            -f x11grab -framerate 30 -i "$DISPLAY" \\
-            -c:v libx264 -preset ultrafast -crf 23 \\
-            -pix_fmt yuv420p -movflags +faststart "$FILE" \\
-            > "$CACHE_DIR/ffmpeg.log" 2>&1 &
+        if [ -n "$AUDIO_SOURCE" ]; then
+            ffmpeg -hide_banner -nostdin -loglevel warning \\
+                -f x11grab -framerate 30 -i "$DISPLAY" \\
+                -f pulse -i "$AUDIO_SOURCE" \\
+                -map 0:v:0 -map 1:a:0 \\
+                -c:v libx264 -preset ultrafast -crf 23 \\
+                -pix_fmt yuv420p -c:a aac -b:a 192k \\
+                -movflags +faststart "$FILE" \\
+                > "$CACHE_DIR/ffmpeg.log" 2>&1 &
+        else
+            ffmpeg -hide_banner -nostdin -loglevel warning \\
+                -f x11grab -framerate 30 -i "$DISPLAY" \\
+                -c:v libx264 -preset ultrafast -crf 23 \\
+                -pix_fmt yuv420p -movflags +faststart "$FILE" \\
+                > "$CACHE_DIR/ffmpeg.log" 2>&1 &
+        fi
     else
-        wf-recorder \\
-            --geometry "$GEOM" \\
-            --file "$FILE" \\
-            --audio=alsa_output.pci-0000_0d_00.6.analog-stereo.monitor \\
-            > "$CACHE_DIR/wf-recorder.log" 2>&1 &
+        if [ -n "$AUDIO_SOURCE" ]; then
+            wf-recorder \\
+                --geometry "$GEOM" \\
+                --file "$FILE" \\
+                --audio="$AUDIO_SOURCE" \\
+                > "$CACHE_DIR/wf-recorder.log" 2>&1 &
+        else
+            wf-recorder \\
+                --geometry "$GEOM" \\
+                --file "$FILE" \\
+                > "$CACHE_DIR/wf-recorder.log" 2>&1 &
+        fi
     fi
 
     PID=$!'''
 
-if old_recorder in sh_text:
-    sh_text = sh_text.replace(old_recorder, new_recorder, 1)
-elif 'ffmpeg -hide_banner -nostdin -loglevel warning' not in sh_text:
-    raise SystemExit("[ERROR] Recorder launch block not found.")
+if re.search(r'if \[ -n "\$AUDIO_SOURCE" \]; then\n.*?\n    PID=\$\!', s, flags=re.S):
+    s2, count = re.subn(
+        recorder_pattern,
+        lambda _: recorder_replacement,
+        s,
+        count=1,
+        flags=re.S,
+    )
+    if count != 1:
+        raise SystemExit("[ERROR] Recorder block replacement failed. No files changed.")
+    s = s2
+elif not (
+    'if [ "$BACKEND" = "x11" ]; then' in s
+    and "-f x11grab" in s
+    and "wf-recorder" in s
+):
+    raise SystemExit("[ERROR] Recorder block not found. No files changed.")
 
-# Back up both files before writing.
-shutil.copy2(ui, ui.with_suffix(".py.bak"))
-shutil.copy2(script, script.with_suffix(".sh.bak"))
 
-ui.write_text(ui_text, encoding="utf-8")
-script.write_text(sh_text, encoding="utf-8")
+# --------------------------------------------------
+# Validate in memory before writing; back up originals
+# --------------------------------------------------
+
+if re.search(r'Adw\.ToolbarView|toolbar\.add_top_bar|Gtk\.FileDialog', u):
+    raise SystemExit("[ERROR] Unsupported GTK components remain. No files changed.")
+
+ui_backup = ui.with_name(ui.name + ".bak")
+sh_backup = script.with_name(script.name + ".bak")
+
+shutil.copy2(ui, ui_backup)
+shutil.copy2(script, sh_backup)
+
+ui.write_text(u, encoding="utf-8")
+script.write_text(s, encoding="utf-8")
 script.chmod(0o755)
 
-print("[OK] UI and recording backend updated.")
-print("[BACKUP]", ui.with_suffix(".py.bak"))
-print("[BACKUP]", script.with_suffix(".sh.bak"))
+print("[OK] UI compatibility updated.")
+print("[OK] X11/Wayland recording backend updated.")
+print("[OK] Existing microphone and system-audio setup preserved.")
+print(f"[BACKUP] {ui_backup}")
+print(f"[BACKUP] {sh_backup}")
 PY
 
 python3 -m py_compile ~/.config/screenrec/screenrec-ui.py &&
 bash -n ~/.config/screenrec/screenrec.sh &&
-echo "[OK] Both files passed syntax checks." &&
+echo "[OK] Syntax checks passed." &&
 python3 ~/.config/screenrec/screenrec-ui.py
 ```
 </details>
