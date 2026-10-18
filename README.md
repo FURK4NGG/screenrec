@@ -41,6 +41,7 @@ Other Wayland compositors and desktop environments have not been verified yet.
 Directory Structure  
 ~/.config/screenrec/  
 ├── install.sh  
+├── config.json (This file is auto-generated)  
 ├── screenrec-ui.py  
 └── screenrec.sh  
 <br>
